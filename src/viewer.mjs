@@ -21,8 +21,8 @@
  */
 
 /**
- * pdfjsVersion = 5.4.192
- * pdfjsBuild = 3c72c53e0
+ * pdfjsVersion = 5.4.194
+ * pdfjsBuild = ac794bf0a
  */
 /******/ // The require scope
 /******/ var __webpack_require__ = {};
@@ -11685,7 +11685,7 @@ class PDFViewer {
   #textLayerMode = TextLayerMode.ENABLE;
   #viewerAlert = null;
   constructor(options) {
-    const viewerVersion = "5.4.192";
+    const viewerVersion = "5.4.194";
     if (version !== viewerVersion) {
       throw new Error(`The API version "${version}" does not match the Viewer version "${viewerVersion}".`);
     }
@@ -14432,6 +14432,54 @@ const ViewOnLoad = {
   PREVIOUS: 0,
   INITIAL: 1
 };
+const SIGNATURE_MARK_SCALE = 4;
+const SIGNATURE_MODE_TIMEOUT = 5000;
+async function rasterizeSignatureMark(editor) {
+  const source = editor.parent?.drawLayer?.getRootElement(editor._drawId);
+  if (!source) {
+    throw new Error("the drawing is not in the page's draw layer");
+  }
+  const {
+    width,
+    height
+  } = source.getBoundingClientRect();
+  if (!width || !height) {
+    throw new Error("the drawing has no size on screen");
+  }
+  const svg = source.cloneNode(true);
+  svg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  svg.setAttribute("width", `${width}`);
+  svg.setAttribute("height", `${height}`);
+  if (!svg.getAttribute("viewBox")) {
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  }
+  const sourcePaths = source.querySelectorAll("path");
+  const clonedPaths = svg.querySelectorAll("path");
+  for (let i = 0; i < clonedPaths.length; i++) {
+    const computed = window.getComputedStyle(sourcePaths[i]);
+    for (const property of ["fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin"]) {
+      clonedPaths[i].setAttribute(property, computed.getPropertyValue(property));
+    }
+  }
+  const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {
+    type: "image/svg+xml;charset=utf-8"
+  }));
+  try {
+    const image = new Image();
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error("Could not rasterize the mark"));
+      image.src = url;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * SIGNATURE_MARK_SCALE));
+    canvas.height = Math.max(1, Math.round(height * SIGNATURE_MARK_SCALE));
+    canvas.getContext("2d").drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png").split(",")[1];
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 const PDFViewerApplication = {
   initialBookmark: document.location.hash.substring(1),
   _initializedCapability: {
@@ -15019,6 +15067,36 @@ const PDFViewerApplication = {
     this.appConfig.toolbar?.signature?.classList.add("hidden");
     this.appConfig.secondaryToolbar?.signatureButton.classList.add("hidden");
   },
+  async enterSignatureMode() {
+    const {
+      eventBus
+    } = this;
+    const isReady = () => this._annotationEditorUIManager?.getMode() === AnnotationEditorType.SIGNATURE && !!this._annotationEditorUIManager.currentLayer;
+    eventBus.dispatch("switchannotationeditormode", {
+      source: this,
+      mode: AnnotationEditorType.SIGNATURE
+    });
+    if (isReady()) {
+      return;
+    }
+    await new Promise(resolve => {
+      let timeoutId = null;
+      const stopWaiting = () => {
+        clearTimeout(timeoutId);
+        eventBus._off("annotationeditormodechanged", onModeChanged);
+        resolve();
+      };
+      const onModeChanged = ({
+        mode
+      }) => {
+        if (mode === AnnotationEditorType.SIGNATURE) {
+          stopWaiting();
+        }
+      };
+      eventBus._on("annotationeditormodechanged", onModeChanged);
+      timeoutId = setTimeout(stopWaiting, SIGNATURE_MODE_TIMEOUT);
+    });
+  },
   async startSignatureFlow({
     name,
     signatureId
@@ -15027,12 +15105,11 @@ const PDFViewerApplication = {
       return;
     }
     this.signatureManager.setPrefilledName(name || "");
-    await this.eventBus.dispatch("switchannotationeditormode", {
-      source: this,
-      mode: AnnotationEditorType.SIGNATURE
-    });
+    await this.enterSignatureMode();
+    this._annotationEditorUIManager?.setActiveEditor(null);
+    this._annotationEditorUIManager?.unselectAll();
     if (signatureId) {
-      this.pdfViewer?.annotationEditorUIManager?.focusSignatureField(signatureId);
+      this._annotationEditorUIManager?.focusSignatureField(signatureId);
     }
     await this.eventBus.dispatch("switchannotationeditorparams", {
       source: this,
@@ -15043,10 +15120,36 @@ const PDFViewerApplication = {
   setActiveSignatureField(signatureId) {
     this._activeSignatureFieldId = signatureId || null;
     signatureFieldController.setActiveField(this._activeSignatureFieldId);
-    this.pdfViewer?.annotationEditorUIManager?.setActiveSignatureField(this._activeSignatureFieldId);
+    this._annotationEditorUIManager?.setActiveSignatureField(this._activeSignatureFieldId);
   },
   cancelSignatureFlow() {
     this.signatureManager?.cancel();
+  },
+  async getSignatureAppearance() {
+    if (!this._annotationEditorUIManager) {
+      throw new Error("the editor manager is not available");
+    }
+    const editors = this._annotationEditorUIManager.getSignatureEditors();
+    if (!editors.length) {
+      throw new Error("no signature was placed");
+    }
+    const editor = editors.at(-1);
+    const serialized = editor.serialize();
+    if (!serialized?.rect) {
+      throw new Error("the signature has no position on the page");
+    }
+    const image = await rasterizeSignatureMark(editor);
+    if (!image) {
+      throw new Error("the signature drawing could not be rasterized");
+    }
+    this.pdfDocument?.annotationStorage.resetModified();
+    delete this._annotationStorageModified;
+    return {
+      image,
+      page: (serialized.pageIndex ?? 0) + 1,
+      rect: serialized.rect.map(Number),
+      field: editor.signatureFieldName ?? null
+    };
   },
   enablePrinting() {
     this.toolbar.printing = true;
@@ -15915,6 +16018,7 @@ const PDFViewerApplication = {
     eventBus._on("annotationeditoruimanager", ({
       uiManager
     }) => {
+      this._annotationEditorUIManager = uiManager;
       if (this._activeSignatureFieldId) {
         uiManager.setActiveSignatureField(this._activeSignatureFieldId);
       }
@@ -16746,8 +16850,8 @@ function beforeUnload(evt) {
 
 
 
-const pdfjsVersion = "5.4.192";
-const pdfjsBuild = "3c72c53e0";
+const pdfjsVersion = "5.4.194";
+const pdfjsBuild = "ac794bf0a";
 const AppConstants = {
   LinkTarget: LinkTarget,
   RenderingStates: RenderingStates,

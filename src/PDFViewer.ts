@@ -72,6 +72,25 @@ interface SignatureFlowParams {
   readonly signatureId?: string | undefined;
 }
 
+/**
+ * The signer's mark and where it belongs on the page, read out of the viewer
+ * without modifying the document.
+ */
+export interface SignatureAppearance {
+  /** Base64-encoded PNG of the mark, with no data-URL prefix. */
+  readonly image: string;
+  /** 1-based page number. */
+  readonly page: number;
+  /** [x1, y1, x2, y2] in PDF points, origin bottom-left. */
+  readonly rect: [number, number, number, number];
+  /**
+   * AcroForm name of the placeholder the mark was placed into, or null when it
+   * was placed freely. The signing service fills that field, so no unclaimed
+   * "Sign here" is left behind.
+   */
+  readonly field: string | null;
+}
+
 interface PDFViewerApplication {
   open(params: OpenDocumentParams): Promise<void>;
   setTheme(theme: Theme): void;
@@ -98,6 +117,7 @@ interface PDFViewerApplication {
   setActiveSignatureField(signatureId: string | null): void;
   cancelSignatureFlow(): void;
   getBase64Document(): Promise<string>;
+  getSignatureAppearance(): Promise<SignatureAppearance>;
 }
 
 interface IframeWindow extends Window {
@@ -196,6 +216,21 @@ class PDFViewer {
     const pdfjsApp = await this.pdfJsApplication();
 
     return pdfjsApp.getBase64Document();
+  };
+
+  /**
+   * Returns the signer's mark and its position, leaving the document alone.
+   *
+   * @returns the mark. Throws, naming what was missing, when none can be read.
+   */
+  public getSignatureAppearance = async (): Promise<SignatureAppearance> => {
+    if (!this.isIframeLoaded) {
+      throw new Error("PDFViewer error: signature appearance can not be read - iframe is not loaded. Call loadUrl or loadBase64 first.");
+    }
+
+    const pdfjsApp = await this.pdfJsApplication();
+
+    return pdfjsApp.getSignatureAppearance();
   };
 
   /**
