@@ -44,6 +44,24 @@ interface SignatureFlowParams {
     readonly name: string;
     readonly signatureId?: string | undefined;
 }
+/**
+ * The signer's mark and where it belongs on the page, read out of the viewer
+ * without modifying the document.
+ */
+interface SignatureAppearance {
+    /** Base64-encoded PNG of the mark, with no data-URL prefix. */
+    readonly image: string;
+    /** 1-based page number. */
+    readonly page: number;
+    /** [x1, y1, x2, y2] in PDF points, origin bottom-left. */
+    readonly rect: [number, number, number, number];
+    /**
+     * AcroForm name of the placeholder the mark was placed into, or null when it
+     * was placed freely. The signing service fills that field, so no unclaimed
+     * "Sign here" is left behind.
+     */
+    readonly field: string | null;
+}
 declare class PDFViewer {
     private readonly container;
     /**
@@ -85,6 +103,12 @@ declare class PDFViewer {
      * Returns the base64 encoded PDF document
      */
     getBase64: () => Promise<string>;
+    /**
+     * Returns the signer's mark and its position, leaving the document alone.
+     *
+     * @returns the mark. Throws, naming what was missing, when none can be read.
+     */
+    getSignatureAppearance: () => Promise<SignatureAppearance>;
     /**
      * Starts the signature flow inside the viewer.
      *
@@ -134,4 +158,4 @@ declare class PDFViewer {
     private pdfJsApplication;
 }
 
-export { Event, PDFViewer, type PDFViewerOptions, type PDFViewerParams, Scale, type SignatureFlowParams, Theme, type ToolbarFontSize, type ToolbarIconSize };
+export { Event, PDFViewer, type PDFViewerOptions, type PDFViewerParams, Scale, type SignatureAppearance, type SignatureFlowParams, Theme, type ToolbarFontSize, type ToolbarIconSize };

@@ -10,8 +10,12 @@ const EMPTY_DOCUMENT = path.resolve(__dirname, 'empty_document.html');
 const SIGNATURE_FIELDS_DOCUMENT = path.resolve(__dirname, 'load_signature_fields_document.html');
 const SIGNATURE_FIELDS_READONLY_DOCUMENT = path.resolve(__dirname, 'load_signature_fields_readonly_document.html');
 const DISCLOSING_FIELD = 'disclosing_party_signature';
+const RECEIVING_FIELD = 'receiving_party_signature';
 const VISIBLE_PLACEHOLDER = '.signatureWidgetAnnotation:not(.signatureFieldHidden)';
 const HIDDEN_PLACEHOLDER = '.signatureWidgetAnnotation.signatureFieldHidden';
+// An earlier signer's mark, as it comes back when the saved document is
+// reopened: the viewer stores it as a stamp annotation.
+const SAVED_MARK = '.annotationLayer section.stampAnnotation';
 
 test('loads document from URL', async ({ page }) => {
   await page.goto(`file://${REMOTE_DOCUMENT}`);
@@ -379,6 +383,78 @@ test('startSignatureFlow can be re-invoked after cancelSignatureFlow', async ({ 
   await expect(signatureCanvas).toHaveValue('Second');
 });
 
+test('startSignatureFlow opens the dialog on a document that already carries a signature', async ({ page }) => {
+  await page.goto(`file://${BASE64_DOCUMENT}`);
+
+  const iframe = page.locator(`#${IFRAME_ID}`).contentFrame();
+  const signatureModal = iframe.getByRole('dialog');
+  const signatureCanvas = signatureModal.getByRole('textbox', { name: 'Type your signature' });
+
+  await waitForViewerReady(page);
+
+  // The first signer leaves a mark and the document is saved with it, which is
+  // what every signer after them opens.
+  await addTypedSignature(page, 'First signer');
+  await reloadSavedDocument(page);
+  await expect(iframe.locator(SAVED_MARK)).toBeVisible();
+
+  // Entering signature mode now has to adopt the mark already on the page, and
+  // the viewer holds that switch back until the page has re-rendered. Asking
+  // for a signature before the switch lands creates nothing at all, silently,
+  // so this is where a signer joining a part-signed document gets stuck.
+  await page.evaluate(() => (window as any).viewer.startSignatureFlow({ name: 'Second signer' }));
+
+  await expect(signatureModal).toBeVisible();
+  await expect(signatureCanvas).toHaveValue('Second signer');
+});
+
+test('startSignatureFlow targets the signer\'s own field on a part-signed document', async ({ page }) => {
+  await page.goto(`file://${SIGNATURE_FIELDS_DOCUMENT}`);
+  await waitForSignatureFields(page);
+
+  const iframe = page.locator(`#${IFRAME_ID}`).contentFrame();
+  const signatureModal = iframe.getByRole('dialog');
+
+  await addTypedSignature(page, 'First signer');
+  await reloadSavedDocument(page);
+  await waitForSignatureFields(page);
+  await expect(iframe.locator(SAVED_MARK)).toBeVisible();
+
+  // Second signer: only their own placeholder is offered, and their mark
+  // belongs in it rather than wherever the page happens to be centred.
+  await page.evaluate(id => (window as any).viewer.setActiveSignatureField(id), RECEIVING_FIELD);
+  await expect(iframe.locator(VISIBLE_PLACEHOLDER)).toHaveCount(1);
+
+  const placeholder = await iframe.locator(VISIBLE_PLACEHOLDER).boundingBox();
+
+  await page.evaluate(
+    id => (window as any).viewer.startSignatureFlow({ name: 'Second signer', signatureId: id }),
+    RECEIVING_FIELD,
+  );
+  await expect(signatureModal).toBeVisible();
+
+  await signatureModal.getByRole('textbox', { name: 'Type your signature' }).fill('Second signer');
+  await signatureModal.getByRole('button', { name: 'Add' }).click();
+
+  const editor = iframe.locator('.signatureEditor');
+  await expect(editor).toBeVisible();
+
+  const mark = await editor.boundingBox();
+
+  if (!placeholder || !mark) {
+    throw new Error('Expected both the placeholder and the placed mark to be on screen');
+  }
+
+  // The mark is fitted inside the reserved box rather than stretched over it,
+  // so assert containment: anywhere else on the page means it was placed at the
+  // viewport's centre instead of the field this signer was given.
+  const slack = 2;
+  expect(mark.x).toBeGreaterThanOrEqual(placeholder.x - slack);
+  expect(mark.y).toBeGreaterThanOrEqual(placeholder.y - slack);
+  expect(mark.x + mark.width).toBeLessThanOrEqual(placeholder.x + placeholder.width + slack);
+  expect(mark.y + mark.height).toBeLessThanOrEqual(placeholder.y + placeholder.height + slack);
+});
+
 test('renders a "Sign here" placeholder for every empty signature field', async ({ page }) => {
   await page.goto(`file://${SIGNATURE_FIELDS_DOCUMENT}`);
   await waitForSignatureFields(page);
@@ -420,6 +496,35 @@ test('hides every placeholder when signing is disabled', async ({ page }) => {
   await expect(iframe.locator(HIDDEN_PLACEHOLDER)).toHaveCount(2);
   await expect(iframe.locator(VISIBLE_PLACEHOLDER)).toHaveCount(0);
 });
+
+/**
+ * Types a signature, places it and accepts it, leaving a mark on the page.
+ */
+const addTypedSignature = async (page: Page, name: string) => {
+  const iframe = page.locator(`#${IFRAME_ID}`).contentFrame();
+  const signatureModal = iframe.getByRole('dialog');
+
+  await page.evaluate(signer => (window as any).viewer.startSignatureFlow({ name: signer }), name);
+  await expect(signatureModal).toBeVisible();
+
+  await signatureModal.getByRole('textbox', { name: 'Type your signature' }).fill(name);
+  await signatureModal.getByRole('button', { name: 'Add' }).click();
+  await expect(iframe.locator('.signatureEditor')).toBeVisible();
+
+  await iframe.locator('.acceptButton').click();
+};
+
+/**
+ * Saves the document as it stands and reopens it, the way the next signer
+ * receives it.
+ */
+const reloadSavedDocument = async (page: Page) => {
+  await page.evaluate(async () => {
+    const viewer = (window as any).viewer;
+
+    await viewer.loadBase64(await viewer.getBase64());
+  });
+};
 
 const waitForSignatureFields = async (page: Page) => {
   await page.waitForFunction(() => {
